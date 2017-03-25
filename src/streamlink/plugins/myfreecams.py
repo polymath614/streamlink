@@ -17,6 +17,7 @@ import random
 import re
 
 from streamlink.plugin import Plugin
+from streamlink.plugin.api import http
 from streamlink.stream import HLSStream
 
 try:
@@ -25,9 +26,11 @@ try:
 except ImportError:
     HAS_WEBSOCKET = False
 
+DATA_URL = "https://www.myfreecams.com/php/modelobject.php?f={0}&s={1}"
 HLS_VIDEO_URL = "http://video{0}.myfreecams.com:1935/NxServer/ngrp:mfc_{1}.f4v_mobile/playlist.m3u8"
 WEBSOCKET_SERVERS = [7, 8, 9, 10, 11, 12, 20, 22, 23, 24, 25, 26, 27, 28, 29, 39]
 
+_session_re = re.compile(r"\173\04522fileno\04522\:\04522(?P<session>[\d_]+)\04522\175")
 _url_re = re.compile(r"https?\:\/\/(?:\w+\.)?myfreecams\.com\/\#(?P<username>\w+)")
 
 
@@ -47,53 +50,68 @@ class MyFreeCams(Plugin):
             self.logger.info("https://pypi.python.org/pypi/websocket-client")
             return
 
-        _data_channel_re = re.compile(r"""
-            %22nm%22:%22(?P<username>{0})%22
-            .+
-            %22uid%22\:(?P<uid>[\d]+)\,
-            %22vs%22\:(?P<vs>[\d]+)\,
-            .+
-            %22camserv%22\:(?P<server>[\d]+)
-            """.format(username), re.VERBOSE)
-
         xchat = "xchat{0}".format(random.choice(WEBSOCKET_SERVERS))
         ws_host = "wss://{0}.myfreecams.com/fcsl".format(xchat)
         ws = create_connection(ws_host)
 
         send_msg_hello = "hello fcserver\n\0"
         send_msg_login = "1 0 0 20071025 0 guest:guest\n\0"
-        send_msg_data = "10 0 0 20 0 {0}\n\0".format(username)
+        send_msg_ping = "1 0 0 0 0\n\0"
         send_msg_logout = "99 0 0 0 0"
 
         ws.send(send_msg_hello)
         ws.send(send_msg_login)
-        ws.send(send_msg_data)
 
-        data_ws = ws.recv()
         loop_number = 0
         status_regex = False
         while status_regex is not True:
-            if loop_number is 15:
-                self.logger.error("Stream is offline or username is invalid - {0}".format(username))
+            if loop_number is 20:
+                # quit script after 20 trys
+                self.logger.debug("Is your connection ok?")
                 return
 
+            # send message to the websocket server
+            ws.send(send_msg_ping)
+            data_ws = ws.recv()
+
             try:
-                data_channel = _data_channel_re.search(data_ws)
+                mfc_session = _session_re.search(data_ws)
+                mfc_session = mfc_session.group("session")
 
-                uid = int(data_channel.group("uid")) + 100000000
-                vs = int(data_channel.group("vs"))
-                camserver = int(data_channel.group("server"))
-
-                if camserver:
+                if mfc_session is not None:
                     status_regex = True
             except:
-                ws.send(send_msg_data)
-                data_ws = ws.recv()
                 loop_number += 1
                 self.logger.debug("-- RESEND WEBSOCKET DATA -- {0} --".format(loop_number))
 
         ws.send(send_msg_logout)
         ws.close()
+
+        # regex for http data
+        _data_channel_re = re.compile(r"""
+            \"nm\"\:\"(?P<username>{0})\"\,
+            [^\173\175]+
+            \"uid\"\:(?P<uid>\d+)\,
+            \"vs\"\:(?P<vs>\d+)\,
+            [^\173\175]+
+            \173
+            [^\173\175]+
+            \"camserv\"\:(?P<server>\d+)
+            """.format(username), re.VERBOSE | re.IGNORECASE)
+
+        # get data from http server
+        cookies = {"cid": "3149", "gw": "1"}
+        res = http.get(DATA_URL.format(mfc_session, xchat), cookies=cookies)
+        data_channel = _data_channel_re.search(res.text)
+
+        if not data_channel:
+            # abort if the regex can't find the username
+            self.logger.error("Stream is offline or username is invalid - {0}".format(username))
+            return
+
+        uid = int(data_channel.group("uid")) + 100000000
+        vs = int(data_channel.group("vs"))
+        camserver = int(data_channel.group("server"))
 
         self.logger.debug("UID: {0}".format(uid))
         self.logger.debug("VS - FCVIDEO: {0}".format(vs))
