@@ -1,3 +1,4 @@
+import json
 import random
 import re
 
@@ -11,11 +12,11 @@ try:
 except ImportError:
     HAS_WEBSOCKET = False
 
-DATA_URL = "https://www.myfreecams.com/php/modelobject.php?f={0}&s={1}"
+DATA_URL = "https://www.myfreecams.com/php/FcwExtResp.php?respkey={respkey}&type={type}&opts={opts}&serv={serv}"
 HLS_VIDEO_URL = "http://video{0}.myfreecams.com:1935/NxServer/ngrp:mfc_{1}.f4v_mobile/playlist.m3u8"
 WEBSOCKET_SERVERS = [7, 8, 9, 10, 11, 12, 20, 22, 23, 24, 25, 26, 27, 28, 29, 39]
 
-_session_re = re.compile(r"\173\04522fileno\04522\:\04522(?P<session>[\d_]+)\04522\175")
+_session_re = re.compile(r'''\04522opts\04522\:(?P<opts>\d+),\04522respkey\04522\:(?P<respkey>\d+),\04522serv\04522\:(?P<serv>\d+),\04522type\04522\:(?P<type>\d+)''')
 _url_re = re.compile(r"https?\:\/\/(?:\w+\.)?myfreecams\.com\/(?:\#(?P<username>\w+)|id\=(?P<user_id>\d+))")
 # USERNAME URL = https://www.myfreecams.com/#UserName
 # CUSTOM ID URL = https://www.myfreecams.com/id=01234567
@@ -69,7 +70,10 @@ class MyFreeCams(Plugin):
 
             try:
                 mfc_session = _session_re.search(data_ws)
-                mfc_session = mfc_session.group("session")
+                data_opts = mfc_session.group("opts")
+                data_respkey = mfc_session.group("respkey")
+                data_serv = mfc_session.group("serv")
+                data_type = mfc_session.group("type")
 
                 if mfc_session is not None:
                     status_regex = True
@@ -88,32 +92,41 @@ class MyFreeCams(Plugin):
             re_username = r"\w+"
 
         # regex for http data
-        _data_channel_re = re.compile(r"""
-            \"nm\"\:\"(?P<username>{0})\"\,
-            [^\173\175]+
-            \"uid\"\:(?P<uid>{1})\,
-            \"vs\"\:(?P<vs>\d+)\,
-            [^\173\175]+
-            \173
-            [^\173\175]+
-            \"camserv\"\:(?P<server>\d+)
-            """.format(re_username, re_uid), re.VERBOSE | re.IGNORECASE)
+        _data_channel_re = re.compile(r'''
+            \133(?:\s+)?(["'](?P<username>{0})["']\,?\d+,(?P<uid>{1})[^\135]+)\135
+            '''.format(re_username, re_uid), re.VERBOSE | re.IGNORECASE)
 
         # get data from http server
         cookies = {"cid": "3149", "gw": "1"}
-        res = http.get(DATA_URL.format(mfc_session, xchat), cookies=cookies)
+        res = http.get(DATA_URL.format(
+            opts=data_opts,
+            respkey=data_respkey,
+            serv=data_serv,
+            type=data_type
+        ), cookies=cookies)
+
         data_channel = _data_channel_re.search(res.text)
+        data_channel = data_channel.group(0)
+        data_channel = json.loads(data_channel)
+
+        # data_channel[0] "nm"
+        # data_channel[1] "sid"
+        # data_channel[2] "uid"
+        # data_channel[3] "vs"
+        # data_channel[4] "pid"
+        # data_channel[5] "lv"
+        # data_channel[6] "camserv"
 
         if not data_channel:
             # abort if the regex can't find the username
             self.logger.error("Stream is offline or username/user_id is invalid")
             return
 
-        username = data_channel.group("username")
-        uid = int(data_channel.group("uid"))
+        username = data_channel[0]
+        uid = int(data_channel[2])
         uid_video = uid + 100000000
-        vs = int(data_channel.group("vs"))
-        camserver = int(data_channel.group("server"))
+        vs = int(data_channel[3])
+        camserver = int(data_channel[6])
 
         self.logger.info("USER ID: {0}".format(uid))
         self.logger.info("USERNAME: {0}".format(username))
